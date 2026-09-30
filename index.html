@@ -3878,6 +3878,31 @@ function syncCfg(){
   }catch(e){}
   return { token, gist, file, auto };
 }
+/* 資料筆數統計（用來防止「空白覆蓋雲端」與確認同步結果） */
+function syncCounts(p){
+  if(!p || typeof p !== 'object') return { total: 0, text: '（無資料）' };
+  const n = k => (Array.isArray(p[k]) ? p[k].length : 0);
+  const items = [
+    ['錶', n('watches')], ['部件', n('parts')], ['銷售', n('sales')], ['預留', n('reservations')],
+    ['想要', n('wants')], ['訂單記錄', n('orderRecords')], ['Hold', n('holds')], ['排程', n('timeline')],
+    ['日程', n('schedules')], ['便籤', n('notes')], ['其他事件', n('otherEvents')], ['模板', n('replyTemplates')]
+  ].filter(x => x[1] > 0);
+  const total = items.reduce((s, x) => s + x[1], 0);
+  return { total, text: items.length ? items.map(x => x[0] + ' ' + x[1]).join('、') : '（空）' };
+}
+function syncLocalCounts(){ return syncCounts(bkBuildPayload()); }
+/* 讀雲端資料檔（回傳 payload 或 null；檔案不存在回 null） */
+async function syncFetchCloud(cfg){
+  const g = await ghApi('GET', '/gists/' + cfg.gist);
+  const f = g.files && g.files[cfg.file];
+  if(!f) return null;
+  let content = f.content;
+  if(f.truncated && f.raw_url){
+    const r = await fetch(f.raw_url);
+    content = await r.text();
+  }
+  return JSON.parse(content);
+}
 function syncStatus(msg, cls){
   const el = $('sync-status');
   if(!el) return;
@@ -3954,12 +3979,14 @@ function renderSyncForm(){
   if(btn) btn.textContent = cfg.auto ? '🔁 自動同步：開' : '🔁 自動同步：關';
   let pushed = '';
   try{ pushed = localStorage.getItem(SYNC_PUSHED_KEY) || ''; }catch(e){}
+  const local = syncLocalCounts();
+  const localTxt = '本機目前：' + local.text;
   if(cfg.token && cfg.gist){
     syncStatus('☁️ 已設定：Gist ' + cfg.gist + ' · 檔名 ' + cfg.file
       + (pushed ? ' · 上次同步 ' + new Date(pushed).toLocaleString('zh-TW') : '')
-      + (cfg.auto ? ' · 自動同步開啟' : ''), 'ok');
+      + (cfg.auto ? ' · 自動同步開啟' : '') + '｜' + localTxt, 'ok');
   }else{
-    syncStatus('尚未設定雲端同步：貼上 token 並填 Gist ID，或按「🧩 自動建立資料 Gist」。', '');
+    syncStatus('尚未設定雲端同步：貼上 token 並填 Gist ID，或按「🧩 自動建立資料 Gist」。｜' + localTxt, '');
   }
 }
 function syncCopyGist(){
@@ -4030,9 +4057,15 @@ async function syncTest(){
       toast('✅ token 有效，登入為 ' + login);
       return;
     }
-    const g = await ghApi('GET', '/gists/' + cfg.gist);
-    const has = !!(g.files && g.files[cfg.file]);
-    syncStatus('✅ 連線成功（登入：' + login + '）｜' + (has ? '雲端已有 ' + cfg.file : '雲端尚無 ' + cfg.file + '（第一次上傳會建立）'), 'ok');
+    const cloud = await syncFetchCloud(cfg);
+    const mine = syncLocalCounts();
+    if(!cloud){
+      syncStatus('✅ 連線成功（登入：' + login + '）｜雲端尚無 ' + cfg.file + '（第一次上傳會建立）｜本機：' + mine.text, 'ok');
+    }else{
+      const cc = syncCounts(cloud);
+      syncStatus('✅ 連線成功（登入：' + login + '）｜雲端：' + cc.text + '（' + (cloud.savedAt || '無時間戳') + '）｜本機：' + mine.text
+        + (cc.total === 0 ? ' ⚠️ 雲端是空的：請按「⬆️ 立即上傳」把本機資料送上去' : ''), cc.total === 0 ? 'warn' : 'ok');
+    }
     toast('✅ 連線測試成功');
   }catch(e){ syncFail(e, cfg.gist ? 'test' : 'user'); }
 }
@@ -4043,12 +4076,32 @@ async function syncPush(manual){
   syncBusy = true;
   try{
     const payload = bkBuildPayload();
+    const mine = syncCounts(payload);
+    /* 防呆 1：本機沒有任何資料 → 絕不自動上傳；手動也要二次確認 */
+    if(mine.total === 0){
+      const ok = manual ? confirm('本機目前沒有任何資料。\n\n上傳會把雲端資料覆蓋成空白！\n（如果你在別的視窗／頁面有資料，請先在那裡操作）\n\n確定還是要上傳空白資料嗎？') : false;
+      if(!ok){
+        syncStatus('⚠️ 已阻止上傳：本機目前沒有資料（避免把雲端清空）。若雲端已有資料，請按「⬇️ 立即下載」把它抓回來。', 'warn');
+        if(manual) toast('⚠️ 已取消上傳：本機沒有資料');
+        return false;
+      }
+    }
+    /* 防呆 2：手動上傳時若雲端筆數比本機多很多，先提醒（避免誤覆蓋） */
+    if(manual && mine.total > 0){
+      try{
+        const cloud = await syncFetchCloud(cfg);
+        const cc = syncCounts(cloud);
+        if(cloud && cc.total > mine.total * 2 + 5){
+          if(!confirm('雲端資料比本機多：\n雲端 ' + cc.total + ' 筆（' + cc.text + '）\n本機 ' + mine.total + ' 筆（' + mine.text + '）\n\n上傳會用「本機」覆蓋雲端，確定嗎？\n（建議先按「⬇️ 立即下載」取得雲端資料）')) return false;
+        }
+      }catch(e){ /* 讀不到雲端不阻擋上傳 */ }
+    }
     await ghApi('PATCH', '/gists/' + cfg.gist, { files: { [cfg.file]: { content: JSON.stringify(payload, null, 2) } } });
     try{
       localStorage.setItem(SYNC_PUSHED_KEY, payload.savedAt);
       localStorage.setItem(SYNC_LOCAL_KEY, payload.savedAt);
     }catch(e){}
-    syncStatus('✅ 已上傳雲端 · ' + new Date().toLocaleTimeString('zh-TW', { hour:'2-digit', minute:'2-digit', second:'2-digit' }) + '（雲端資料時間 ' + payload.savedAt + '）', 'ok');
+    syncStatus('✅ 已上傳雲端 · ' + new Date().toLocaleTimeString('zh-TW', { hour:'2-digit', minute:'2-digit', second:'2-digit' }) + '（雲端資料時間 ' + payload.savedAt + '）｜本次上傳內容：' + mine.text, 'ok');
     if(manual) toast('✅ 已上傳雲端');
     return true;
   }catch(e){ syncFail(e, 'push'); return false; }
@@ -4061,19 +4114,25 @@ async function syncPull(manual){
   syncBusy = true;
   try{
     syncStatus('⬇️ 讀取雲端資料中…', 'warn');
-    const g = await ghApi('GET', '/gists/' + cfg.gist);
-    const f = g.files && g.files[cfg.file];
-    if(!f){
+    const payload = await syncFetchCloud(cfg);
+    if(!payload){
       syncBusy = false;
       if(manual) toast('雲端還沒有資料檔，改為上傳本機資料');
       await syncPush(manual);
       return false;
     }
-    let content = f.content;
-    if(f.truncated && f.raw_url){ content = await (await fetch(f.raw_url)).text(); }
-    let payload = null;
-    try{ payload = JSON.parse(content); }catch(e){ throw new Error('雲端資料檔格式錯誤'); }
-    if(!payload || payload.version !== 1 || !Array.isArray(payload.parts)) throw new Error('雲端資料檔格式不符合');
+    if(payload.version !== 1 || !Array.isArray(payload.parts)) throw new Error('雲端資料檔格式不符合');
+    /* 防呆：雲端是空的但本機有資料 → 不自動覆蓋，並提示改為上傳 */
+    const cloudCounts = syncCounts(payload);
+    const mineCounts = syncLocalCounts();
+    if(cloudCounts.total === 0 && mineCounts.total > 0){
+      if(manual){
+        if(!confirm('雲端資料檔是「空的」（可能是之前誤上傳空白資料）。\n\n按「確定」＝仍用空白覆蓋本機（不建議）\n按「取消」＝保留本機，然後請按「⬆️ 立即上傳」把本機資料送上去')) return false;
+      }else{
+        syncStatus('⚠️ 雲端是空的，已略過自動下載以免清空本機（本機 ' + mineCounts.text + '）。請按「⬆️ 立即上傳」把本機資料送上去。', 'warn');
+        return false;
+      }
+    }
     let localAt = '', pushedAt = '';
     try{
       localAt = localStorage.getItem(SYNC_LOCAL_KEY) || '';
@@ -4098,7 +4157,7 @@ async function syncPull(manual){
       localStorage.setItem(SYNC_PUSHED_KEY, payload.savedAt);
       localStorage.setItem(SYNC_LOCAL_KEY, payload.savedAt);
     }catch(e){}
-    syncStatus('✅ 已從雲端下載並套用 · 雲端資料時間 ' + payload.savedAt, 'ok');
+    syncStatus('✅ 已從雲端下載並套用 · 雲端資料時間 ' + payload.savedAt + '｜雲端內容：' + cloudCounts.text, 'ok');
     if(manual) toast('✅ 已下載雲端資料（本機已更新）');
     return true;
   }catch(e){ syncFail(e, 'pull'); return false; }
