@@ -1,0 +1,14 @@
+# ⚠️ 絕不把業務資料推上 GitHub：備份檔／資料檔一律忽略
+*.json
+*.bak
+*.bak.*
+*.orig
+
+# 雲端硬碟（百度同步盤）與同步衝突產生的暫存檔，不要 commit
+*baiduyun*
+*.uploading.cfg
+*冲突*
+*conflicted copy*
+
+# macOS
+.DS_Store
