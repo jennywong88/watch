@@ -1424,7 +1424,13 @@
             <button class="btn btn-ghost" data-act="sync-toggle-token" type="button" id="sync-token-eye">👁 顯示</button>
           </div>
         </div>
-        <div class="field"><label>Gist ID（資料存放的 gist）</label><input type="text" id="sync-gist" placeholder="例：a1b2c3d4e5f6a7b8c9d0" autocomplete="off"></div>
+        <div class="field"><label>Gist ID（資料存放的 gist；兩台裝置要填同一個）</label>
+          <div class="model-row">
+            <input type="text" id="sync-gist" placeholder="按下方「🧩 自動建立資料 Gist」會自動填入" autocomplete="off">
+            <button class="btn btn-ghost" data-act="sync-copy-gist" type="button" title="複製 Gist ID（貼到 iPad 用）">📋 複製</button>
+            <button class="btn btn-ghost" data-act="sync-open-gist" type="button" title="在 GitHub 開啟這個 Gist">🔗</button>
+          </div>
+        </div>
         <div class="field"><label>資料檔名</label><input type="text" id="sync-file" placeholder="watch-inventory-data.json"></div>
       </div>
       <div class="form-actions">
@@ -1439,7 +1445,8 @@
       <div class="muted" style="margin-top:12px; line-height:1.8">
         ⓘ 產生 token：GitHub → Settings → Developer settings → Personal access tokens → <b>Fine-grained tokens</b> → 只給 <b>Gists: Read and write</b>（其他權限都不用給）→ 複製貼到上面。<br>
         ⓘ 資料 Gist 建議用 <b>secret gist</b>（不被搜尋，但知道 ID 的人可讀）。可按「🧩 自動建立資料 Gist」一鍵產生。<br>
-        ⓘ token 只存在這台裝置的瀏覽器，<b>不會</b>寫入備份檔，也只會送到 api.github.com；換裝置（例如 iPad）要各輸入一次。
+        ⓘ token 只存在這台裝置的瀏覽器，<b>不會</b>寫入備份檔，也只會送到 api.github.com；換裝置（例如 iPad）要各輸入一次。<br>
+        ⓘ <b>Gist ID 是兩台裝置共用的關鍵</b>：在其中一台按「🧩 自動建立資料 Gist」後，用「📋 複製」把 ID 帶到另一台貼在 Gist ID 欄，兩邊才會看到同一份資料。
       </div>
     </div>
 
@@ -3895,7 +3902,7 @@ function syncReadForm(){
   }catch(e){}
   return syncCfg();
 }
-async function ghApi(method, path, body){
+async function ghApiFull(method, path, body){
   const cfg = syncCfg();
   if(!cfg.token) throw new Error('尚未設定 token');
   let res;
@@ -3914,22 +3921,29 @@ async function ghApi(method, path, body){
   }
   let json = null;
   try{ json = await res.json(); }catch(e){}
+  const scopes = (res.headers && res.headers.get) ? (res.headers.get('x-oauth-scopes') || '') : '';
   if(!res.ok){
     const err = new Error((json && json.message) || ('HTTP ' + res.status));
     err.status = res.status;
     throw err;
   }
-  return json;
+  return { json, scopes };
 }
-function syncFail(e){
+async function ghApi(method, path, body){ return (await ghApiFull(method, path, body)).json; }
+function syncFail(e, action){
   const s = e && e.status;
+  const label = { create: '建立資料 Gist', test: '連線測試', push: '上傳', pull: '下載', user: 'token 檢查' }[action] || '同步';
   let hint = '';
-  if(s === 401) hint = '（token 無效或已被撤銷）';
-  else if(s === 403) hint = '（token 權限不足：需要 Gists 讀寫）';
-  else if(s === 404) hint = '（找不到 gist：Gist ID 是否正確）';
+  if(s === 401) hint = '（token 無效、過期或已被撤銷 → 請重新產生並貼上）';
+  else if(s === 403) hint = '（權限不足或已達 API 使用上限）';
+  else if(s === 404){
+    hint = (action === 'create' || action === 'user')
+      ? '（這個 token 沒有 Gist 權限：fine-grained token 請到 Account permissions 勾「Gists: Read and write」；classic token 請勾「gist」。只勾 repo 的 token 不能用來同步。）'
+      : '（Gist ID 不正確、該 Gist 已被刪除，或這個 token 沒有讀取它的權限）';
+  }
   else if(e && e.network) hint = '（請檢查網路；本機資料不受影響）';
-  syncStatus('❌ 同步失敗：' + ((e && e.message) || e) + hint, 'err');
-  toast('❌ 雲端同步失敗' + hint);
+  syncStatus('❌ ' + label + '失敗：' + ((e && e.message) || e) + hint, 'err');
+  toast('❌ ' + label + '失敗' + hint);
 }
 function renderSyncForm(){
   const cfg = syncCfg();
@@ -3947,6 +3961,25 @@ function renderSyncForm(){
   }else{
     syncStatus('尚未設定雲端同步：貼上 token 並填 Gist ID，或按「🧩 自動建立資料 Gist」。', '');
   }
+}
+function syncCopyGist(){
+  const cfg = syncCfg();
+  if(!cfg.gist){ toast('尚未建立或填入 Gist ID'); return; }
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(cfg.gist).then(
+        () => toast('📋 已複製 Gist ID：' + cfg.gist),
+        () => toast('請手動複製 Gist ID：' + cfg.gist)
+      );
+    }else{
+      toast('請手動複製 Gist ID：' + cfg.gist);
+    }
+  }catch(e){ toast('請手動複製 Gist ID：' + cfg.gist); }
+}
+function syncOpenGist(){
+  const cfg = syncCfg();
+  if(!cfg.gist){ toast('尚未建立或填入 Gist ID'); return; }
+  window.open('https://gist.github.com/' + cfg.gist, '_blank', 'noopener');
 }
 function syncToggleToken(){
   const t = $('sync-token'), eye = $('sync-token-eye');
@@ -3973,19 +4006,35 @@ async function syncCreateGist(){
       localStorage.setItem(SYNC_LOCAL_KEY, payload.savedAt);
     }catch(e){}
     renderSyncForm();
+    syncStatus('✅ 已建立資料 Gist：' + g.id + '（已上傳目前資料）｜請按「📋 複製」把這個 Gist ID 帶到另一台裝置（iPad）貼上。', 'ok');
     toast('✅ 已建立資料 Gist 並上傳目前資料');
-  }catch(e){ syncFail(e); }
+  }catch(e){ syncFail(e, 'create'); }
 }
 async function syncTest(){
-  const cfg = syncReady(true);
-  if(!cfg) return;
+  const cfg = syncReadForm();
+  if(!cfg.token){ toast('⚠️ 請先貼上 GitHub token'); return; }
   try{
-    syncStatus('🔌 測試連線中…', 'warn');
+    syncStatus('🔍 檢查 token 中…', 'warn');
+    const me = await ghApiFull('GET', '/user');
+    const login = (me.json && me.json.login) || '（未知）';
+    const scopes = me.scopes || '';
+    if(!cfg.gist){
+      const isClassic = !!scopes;
+      const hasGist = isClassic && scopes.split(',').map(x => x.trim()).indexOf('gist') !== -1;
+      syncStatus('✅ token 有效（登入：' + login + '）'
+        + (isClassic
+            ? '｜classic 權限：' + scopes + (hasGist ? '（含 gist ✓）' : ' ⚠️ 不含 gist → 請重新產生 token 並勾 gist')
+            : '｜fine-grained token：請確認 Account permissions 已勾「Gists: Read and write」')
+        + '｜接著按「🧩 自動建立資料 Gist」，或填入既有的 Gist ID。',
+        (isClassic && !hasGist) ? 'warn' : 'ok');
+      toast('✅ token 有效，登入為 ' + login);
+      return;
+    }
     const g = await ghApi('GET', '/gists/' + cfg.gist);
     const has = !!(g.files && g.files[cfg.file]);
-    syncStatus('✅ 連線成功｜' + (has ? '雲端已有 ' + cfg.file : '雲端尚無 ' + cfg.file + '（第一次上傳會建立）'), 'ok');
+    syncStatus('✅ 連線成功（登入：' + login + '）｜' + (has ? '雲端已有 ' + cfg.file : '雲端尚無 ' + cfg.file + '（第一次上傳會建立）'), 'ok');
     toast('✅ 連線測試成功');
-  }catch(e){ syncFail(e); }
+  }catch(e){ syncFail(e, cfg.gist ? 'test' : 'user'); }
 }
 async function syncPush(manual){
   const cfg = syncReady(manual);
@@ -4002,7 +4051,7 @@ async function syncPush(manual){
     syncStatus('✅ 已上傳雲端 · ' + new Date().toLocaleTimeString('zh-TW', { hour:'2-digit', minute:'2-digit', second:'2-digit' }) + '（雲端資料時間 ' + payload.savedAt + '）', 'ok');
     if(manual) toast('✅ 已上傳雲端');
     return true;
-  }catch(e){ syncFail(e); return false; }
+  }catch(e){ syncFail(e, 'push'); return false; }
   finally{ syncBusy = false; }
 }
 async function syncPull(manual){
@@ -4052,7 +4101,7 @@ async function syncPull(manual){
     syncStatus('✅ 已從雲端下載並套用 · 雲端資料時間 ' + payload.savedAt, 'ok');
     if(manual) toast('✅ 已下載雲端資料（本機已更新）');
     return true;
-  }catch(e){ syncFail(e); return false; }
+  }catch(e){ syncFail(e, 'pull'); return false; }
   finally{ syncBusy = false; }
 }
 function syncSchedule(){
@@ -4063,6 +4112,10 @@ function syncSchedule(){
 }
 function syncToggleAuto(){
   const cfg = syncReadForm();
+  if(!cfg.auto && (!cfg.token || !cfg.gist)){
+    toast('⚠️ 請先設定 token 與 Gist ID（或按「🧩 自動建立資料 Gist」）再開啟自動同步');
+    return;
+  }
   const on = !cfg.auto;
   try{ localStorage.setItem(SYNC_AUTO_KEY, on ? '1' : '0'); }catch(e){}
   renderSyncForm();
@@ -6713,6 +6766,8 @@ document.addEventListener('click', (e) => {
     case 'bk-restore': bkRestore(); break;
     /* 雲端同步（GitHub Gist） */
     case 'sync-toggle-token': syncToggleToken(); break;
+    case 'sync-copy-gist': syncCopyGist(); break;
+    case 'sync-open-gist': syncOpenGist(); break;
     case 'sync-new-gist': syncCreateGist(); break;
     case 'sync-test': syncTest(); break;
     case 'sync-push': syncPush(true); break;
